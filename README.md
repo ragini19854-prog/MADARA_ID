@@ -44,11 +44,7 @@ python bot.py
 
 ## Owner IDs (preloaded)
 
-- 6710777832
-- 8394041476
-- 8396616795
-- 8498330921
-- 8595642160
+NAHI PATA
 
 ## Core owner commands
 
@@ -73,5 +69,10 @@ python bot.py
 
 
 ## Security note
+
+
+
+MADE BY LOVE
+MADARA
 
 - If you shared your bot token publicly, rotate it immediately with @BotFather and update `.env`.
