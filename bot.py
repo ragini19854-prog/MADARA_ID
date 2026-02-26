@@ -447,7 +447,10 @@ async def buy_now(callback):
     if purchase_id is None:
         bal = await db.get_balance(callback.from_user.id)
         await callback.message.answer(
-            f"Insufficient balance. Need ₹{account.price:.2f}, you have ₹{bal:.2f}. Please deposit first."
+            "❌ Insufficient deposit balance.\n"
+            f"Price: ₹{account.price:.2f}\n"
+            f"Your Balance: ₹{bal:.2f}\n\n"
+            "PLSS FIRST DEPOSIT USING DEPLOST BUTTON THEN PURCHASE THE NUMBER."
         )
         await callback.answer()
         return
@@ -560,7 +563,7 @@ async def setotp_cmd(message: Message):
     _, user_id = updated
     await bot.send_message(
         user_id,
-        f"🔐 OTP Received\nNumber: <code>{number}</code>\nOTP: <code>{otp}</code>\nPassword: <code>{DEFAULT_PASSWORD}</code>",
+        f"🔐 OTP Received\nNumber: <code>{number}</code>\nOTP:- <code>{otp}</code>\nPASS :- <code>{DEFAULT_PASSWORD}</code>",
     )
     await message.answer("OTP pushed to user instantly.")
 
@@ -605,4 +608,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main()
