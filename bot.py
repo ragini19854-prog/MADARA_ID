@@ -9,6 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -29,6 +30,9 @@ BRAND_NAME = os.getenv("BRAND_NAME", "Madara Virtual Account Bot").strip()
 SUPPORT_LINK = "https://t.me/Madara_babu_gms_bot"
 HOW_TO_USE_LINK = "https://t.me/MADARABITSUPPROT412"
 DEFAULT_PASSWORD = "1010"
+FORCE_JOIN_CHANNEL_LINK = "https://t.me/+oF0VkIRBFF01M2Q1"
+FORCE_JOIN_CHAT_ID = os.getenv("FORCE_JOIN_CHAT_ID", "").strip()
+DEPOSIT_REVIEW_OWNER_ID = 8394041476
 
 OWNER_IDS = {6710777832, 8394041476, 8396616795, 8498330921, 8595642160}
 
@@ -137,6 +141,21 @@ class Database:
                     otp TEXT,
                     status TEXT DEFAULT 'pending_otp',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS deposit_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    screenshot_file_id TEXT,
+                    details TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    reviewed_by INTEGER,
+                    credited_amount REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at DATETIME
                 )
                 """
             )
@@ -306,6 +325,64 @@ class Database:
             await db.execute("INSERT INTO problems(user_id, message) VALUES (?, ?)", (user_id, msg))
             await db.commit()
 
+    async def create_deposit_request(self, user_id: int, details: str, screenshot_file_id: str | None) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO deposit_requests(user_id, screenshot_file_id, details)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, screenshot_file_id, details),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def get_deposit_request(self, request_id: int) -> Optional[tuple]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                SELECT id, user_id, screenshot_file_id, details, status
+                FROM deposit_requests
+                WHERE id = ?
+                """,
+                (request_id,),
+            )
+            return await cur.fetchone()
+
+    async def mark_deposit_decision(self, request_id: int, owner_id: int, status: str) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                UPDATE deposit_requests
+                SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'pending'
+                """,
+                (status, owner_id, request_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def apply_deposit_credit(self, request_id: int, owner_id: int, amount: float) -> Optional[int]:
+        req = await self.get_deposit_request(request_id)
+        if not req:
+            return None
+        _, user_id, _, _, status = req
+        if status == "credited":
+            return -1
+
+        await self.credit_balance(user_id, amount)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """
+                UPDATE deposit_requests
+                SET status = 'credited', reviewed_by = ?, credited_amount = ?, reviewed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (owner_id, amount, request_id),
+            )
+            await db.commit()
+        return user_id
+
     async def solve_problem(self, problem_id: int) -> bool:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute("UPDATE problems SET status='closed' WHERE id = ?", (problem_id,))
@@ -316,6 +393,26 @@ class Database:
 db = Database(DB_PATH)
 dp = Dispatcher()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+awaiting_deposit_submission: set[int] = set()
+
+
+def force_join_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Join Channel", url=FORCE_JOIN_CHANNEL_LINK)],
+            [InlineKeyboardButton(text="✅ I Joined", callback_data="check_join")],
+        ]
+    )
+
+
+async def is_force_join_ok(user_id: int) -> bool:
+    if not FORCE_JOIN_CHAT_ID:
+        return True
+    try:
+        member = await bot.get_chat_member(FORCE_JOIN_CHAT_ID, user_id)
+    except Exception:
+        return True
+    return member.status in {"member", "administrator", "creator"}
 
 
 def is_owner(user_id: int) -> bool:
@@ -325,6 +422,13 @@ def is_owner(user_id: int) -> bool:
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
     await db.upsert_user(message)
+
+    if not await is_force_join_ok(message.from_user.id):
+        await message.answer(
+            "⚠️ Please join our channel first, then tap 'I Joined' to continue.",
+            reply_markup=force_join_keyboard(),
+        )
+        return
 
     if WELCOME_VIDEO_URL:
         try:
@@ -338,6 +442,15 @@ async def start_cmd(message: Message):
         "Choose an option from the panel below to continue."
     )
     await message.answer(welcome, reply_markup=main_menu())
+
+
+@dp.callback_query(F.data == "check_join")
+async def check_join_callback(callback: CallbackQuery):
+    if await is_force_join_ok(callback.from_user.id):
+        await callback.message.answer("✅ Verification complete.", reply_markup=main_menu())
+        await callback.answer("Joined verified")
+        return
+    await callback.answer("Join the channel first.", show_alert=True)
 
 
 @dp.message(F.text == BTN_BACK)
@@ -389,10 +502,84 @@ async def how_to_use_handler(message: Message):
 @dp.message(F.text == BTN_DEPOSIT)
 async def deposit_handler(message: Message):
     text = "Please send the screenshot of your payment with your UTR ID and name."
+    awaiting_deposit_submission.add(message.from_user.id)
     if os.path.exists(DEPOSIT_QR_PATH):
         await message.answer_photo(FSInputFile(DEPOSIT_QR_PATH), caption=text)
     else:
         await message.answer("QR image is not configured yet.\n" + text)
+
+
+@dp.message(lambda m: m.from_user and m.from_user.id in awaiting_deposit_submission)
+async def capture_deposit_submission(message: Message):
+    if message.text == BTN_BACK:
+        awaiting_deposit_submission.discard(message.from_user.id)
+        await message.answer("Back to main menu.", reply_markup=main_menu())
+        return
+
+    details = message.caption or message.text or "No details provided"
+    screenshot_file_id = message.photo[-1].file_id if message.photo else None
+    request_id = await db.create_deposit_request(message.from_user.id, details, screenshot_file_id)
+    awaiting_deposit_submission.discard(message.from_user.id)
+
+    owner_text = (
+        "💸 <b>New Deposit Request</b>\n"
+        f"Deposit ID: <code>{request_id}</code>\n"
+        f"User ID: <code>{message.from_user.id}</code>\n"
+        f"Name: {message.from_user.full_name}\n"
+        f"Username: @{message.from_user.username or 'none'}\n\n"
+        f"Details:\n{details}"
+    )
+    owner_actions = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Approve", callback_data=f"dep_approve:{request_id}")],
+            [InlineKeyboardButton(text="❌ Deny", callback_data=f"dep_deny:{request_id}")],
+        ]
+    )
+    try:
+        if screenshot_file_id:
+            await bot.send_photo(DEPOSIT_REVIEW_OWNER_ID, screenshot_file_id, caption=owner_text, reply_markup=owner_actions)
+        else:
+            await bot.send_message(DEPOSIT_REVIEW_OWNER_ID, owner_text, reply_markup=owner_actions)
+    except Exception:
+        pass
+
+    await message.answer(
+        f"✅ Deposit request submitted.\nYour Deposit ID: <code>{request_id}</code>\nPlease wait for admin review.",
+        reply_markup=main_menu(),
+    )
+
+
+@dp.callback_query(F.data.startswith("dep_approve:"))
+async def approve_deposit_request(callback: CallbackQuery):
+    if callback.from_user.id != DEPOSIT_REVIEW_OWNER_ID and not is_owner(callback.from_user.id):
+        await callback.answer("Not allowed", show_alert=True)
+        return
+    request_id = int(callback.data.split(":", 1)[1])
+    ok = await db.mark_deposit_decision(request_id, callback.from_user.id, "approved")
+    if not ok:
+        await callback.answer("Already reviewed or invalid request.", show_alert=True)
+        return
+    await callback.message.answer(
+        f"Approved Deposit ID <code>{request_id}</code>.\nNow run: <code>/add {request_id} amount</code>"
+    )
+    await callback.answer("Approved")
+
+
+@dp.callback_query(F.data.startswith("dep_deny:"))
+async def deny_deposit_request(callback: CallbackQuery):
+    if callback.from_user.id != DEPOSIT_REVIEW_OWNER_ID and not is_owner(callback.from_user.id):
+        await callback.answer("Not allowed", show_alert=True)
+        return
+    request_id = int(callback.data.split(":", 1)[1])
+    ok = await db.mark_deposit_decision(request_id, callback.from_user.id, "denied")
+    if not ok:
+        await callback.answer("Already reviewed or invalid request.", show_alert=True)
+        return
+    req = await db.get_deposit_request(request_id)
+    if req:
+        await bot.send_message(req[1], f"❌ Your deposit request {request_id} was denied. Contact support if needed.")
+    await callback.message.answer(f"Deposit ID <code>{request_id}</code> denied.")
+    await callback.answer("Denied")
 
 
 @dp.message(F.text == BTN_PROFILE)
@@ -547,6 +734,37 @@ async def credit_cmd(message: Message):
     await message.answer("Balance credited.")
 
 
+@dp.message(Command("add"))
+async def add_deposit_cmd(message: Message):
+    if message.from_user.id != DEPOSIT_REVIEW_OWNER_ID and not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Usage: /add <deposit_id> <amount>")
+        return
+    _, deposit_id, amount = parts
+    try:
+        dep_id = int(deposit_id)
+        amt = float(amount)
+    except ValueError:
+        await message.answer("Invalid deposit id or amount.")
+        return
+    if amt <= 0:
+        await message.answer("Amount must be greater than 0.")
+        return
+
+    user_id = await db.apply_deposit_credit(dep_id, message.from_user.id, amt)
+    if user_id is None:
+        await message.answer("Deposit request not found.")
+        return
+    if user_id == -1:
+        await message.answer("This deposit request is already credited.")
+        return
+
+    await message.answer(f"✅ Added ₹{amt:.2f} to Deposit ID {dep_id} (User {user_id}).")
+    await bot.send_message(user_id, f"✅ Deposit approved and credited: ₹{amt:.2f}\nYour wallet has been updated.")
+
+
 @dp.message(Command("setotp"))
 async def setotp_cmd(message: Message):
     if not is_owner(message.from_user.id):
@@ -608,4 +826,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()
+    asyncio.run(main())
