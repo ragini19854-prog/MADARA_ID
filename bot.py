@@ -36,9 +36,11 @@ DEPOSIT_REVIEW_OWNER_ID = 8394041476
 
 OWNER_IDS = {6710777832, 8394041476, 8396616795, 8498330921, 8595642160}
 
-BTN_TELEGRAM = "📲 Telegram Accounts"
+BTN_TG1 = "📲 TG ACCOUNT 1"
+BTN_TG2 = "📲 TG ACCOUNT 2"
 BTN_WHATSAPP = "📲 WhatsApp SMS"
-BTN_DEPOSIT = "💸 Deposit"
+BTN_DEPOSIT1 = "💸 DEPOSUIT 1"
+BTN_DEPOSIT2 = "💸 DEPOSIT 2"
 BTN_PROFILE = "👤 My Profile"
 BTN_SUPPORT = "🧑‍💼 Support"
 BTN_HOW_TO_USE = "📖 How to Use"
@@ -48,8 +50,9 @@ BTN_BACK = "🔙 Back"
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_TELEGRAM), KeyboardButton(text=BTN_WHATSAPP)],
-            [KeyboardButton(text=BTN_DEPOSIT), KeyboardButton(text=BTN_PROFILE)],
+            [KeyboardButton(text=BTN_TG1), KeyboardButton(text=BTN_TG2)],
+            [KeyboardButton(text=BTN_WHATSAPP), KeyboardButton(text=BTN_PROFILE)],
+            [KeyboardButton(text=BTN_DEPOSIT1), KeyboardButton(text=BTN_DEPOSIT2)],
             [KeyboardButton(text=BTN_SUPPORT), KeyboardButton(text=BTN_HOW_TO_USE)],
         ],
         resize_keyboard=True,
@@ -95,6 +98,8 @@ class Account:
     price: float
     account_type: str
     status: str
+    tg_add_id: Optional[int] = None
+    login_status: str = "pending"
 
 
 class Database:
@@ -110,6 +115,8 @@ class Database:
                     username TEXT,
                     first_name TEXT,
                     balance REAL DEFAULT 0,
+                    deposit_1 REAL DEFAULT 0,
+                    deposit_2 REAL DEFAULT 0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -122,6 +129,8 @@ class Database:
                     country TEXT NOT NULL,
                     price REAL NOT NULL,
                     account_type TEXT NOT NULL,
+                    tg_add_id INTEGER,
+                    login_status TEXT DEFAULT 'pending',
                     status TEXT DEFAULT 'available',
                     added_by INTEGER,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -151,6 +160,7 @@ class Database:
                     user_id INTEGER NOT NULL,
                     screenshot_file_id TEXT,
                     details TEXT NOT NULL,
+                    deposit_type TEXT DEFAULT 'deposit_1',
                     status TEXT DEFAULT 'pending',
                     reviewed_by INTEGER,
                     credited_amount REAL,
@@ -170,7 +180,18 @@ class Database:
                 )
                 """
             )
+            await self._safe_add_column(db, "users", "deposit_1", "REAL DEFAULT 0")
+            await self._safe_add_column(db, "users", "deposit_2", "REAL DEFAULT 0")
+            await self._safe_add_column(db, "accounts", "tg_add_id", "INTEGER")
+            await self._safe_add_column(db, "accounts", "login_status", "TEXT DEFAULT 'pending'")
+            await self._safe_add_column(db, "deposit_requests", "deposit_type", "TEXT DEFAULT 'deposit_1'")
             await db.commit()
+
+    async def _safe_add_column(self, db, table: str, column: str, ddl: str):
+        cur = await db.execute(f"PRAGMA table_info({table})")
+        cols = {row[1] for row in await cur.fetchall()}
+        if column not in cols:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     async def upsert_user(self, message: Message):
         async with aiosqlite.connect(self.path) as db:
@@ -225,7 +246,7 @@ class Database:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 """
-                SELECT id, number, country, price, account_type, status
+                SELECT id, number, country, price, account_type, status, tg_add_id, login_status
                 FROM accounts
                 WHERE account_type = ? AND country = ? AND status = 'available'
                 ORDER BY id ASC
@@ -250,33 +271,42 @@ class Database:
             row = await cur.fetchone()
             return Account(*row) if row else None
 
-    async def get_balance(self, user_id: int) -> float:
+    async def get_wallets(self, user_id: int) -> tuple[float, float]:
         async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+            cur = await db.execute("SELECT deposit_1, deposit_2 FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
-            return float(row[0]) if row else 0.0
+            if not row:
+                return 0.0, 0.0
+            return float(row[0] or 0), float(row[1] or 0)
 
-    async def set_balance(self, user_id: int, amount: float):
+    async def credit_wallet(self, user_id: int, wallet: str, amount: float):
+        if wallet not in {"deposit_1", "deposit_2"}:
+            wallet = "deposit_1"
         async with aiosqlite.connect(self.path) as db:
-            await db.execute(
-                """
-                INSERT INTO users(user_id, balance) VALUES(?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET balance = excluded.balance
-                """,
-                (user_id, amount),
-            )
+            await db.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (user_id,))
+            await db.execute(f"UPDATE users SET {wallet} = COALESCE({wallet}, 0) + ? WHERE user_id = ?", (amount, user_id))
             await db.commit()
 
-    async def credit_balance(self, user_id: int, amount: float):
-        bal = await self.get_balance(user_id)
-        await self.set_balance(user_id, bal + amount)
+    async def purchase(self, user_id: int, account: Account) -> tuple[Optional[int], str | None]:
+        dep1, dep2 = await self.get_wallets(user_id)
+        wallet_used = None
+        if account.account_type == "tg2":
+            if dep1 >= account.price:
+                wallet_used = "deposit_1"
+        elif account.account_type == "tg1":
+            if dep2 >= account.price:
+                wallet_used = "deposit_2"
+        elif account.account_type == "whatsapp":
+            if dep1 >= account.price:
+                wallet_used = "deposit_1"
+            elif dep2 >= account.price:
+                wallet_used = "deposit_2"
 
-    async def purchase(self, user_id: int, account: Account) -> Optional[int]:
-        bal = await self.get_balance(user_id)
-        if bal < account.price:
-            return None
+        if not wallet_used:
+            return None, None
+
         async with aiosqlite.connect(self.path) as db:
-            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (account.price, user_id))
+            await db.execute(f"UPDATE users SET {wallet_used} = {wallet_used} - ? WHERE user_id = ?", (account.price, user_id))
             await db.execute("UPDATE accounts SET status = 'sold' WHERE id = ?", (account.id,))
             cur = await db.execute(
                 """
@@ -286,7 +316,7 @@ class Database:
                 (user_id, account.id, account.number, account.country, account.price, account.account_type),
             )
             await db.commit()
-            return cur.lastrowid
+            return cur.lastrowid, wallet_used
 
     async def purchase_history(self, user_id: int) -> list[tuple]:
         async with aiosqlite.connect(self.path) as db:
@@ -325,14 +355,14 @@ class Database:
             await db.execute("INSERT INTO problems(user_id, message) VALUES (?, ?)", (user_id, msg))
             await db.commit()
 
-    async def create_deposit_request(self, user_id: int, details: str, screenshot_file_id: str | None) -> int:
+    async def create_deposit_request(self, user_id: int, details: str, screenshot_file_id: str | None, deposit_type: str) -> int:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 """
-                INSERT INTO deposit_requests(user_id, screenshot_file_id, details)
-                VALUES (?, ?, ?)
+                INSERT INTO deposit_requests(user_id, screenshot_file_id, details, deposit_type)
+                VALUES (?, ?, ?, ?)
                 """,
-                (user_id, screenshot_file_id, details),
+                (user_id, screenshot_file_id, details, deposit_type),
             )
             await db.commit()
             return cur.lastrowid
@@ -341,7 +371,7 @@ class Database:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 """
-                SELECT id, user_id, screenshot_file_id, details, status
+                SELECT id, user_id, screenshot_file_id, details, deposit_type, status
                 FROM deposit_requests
                 WHERE id = ?
                 """,
@@ -366,11 +396,11 @@ class Database:
         req = await self.get_deposit_request(request_id)
         if not req:
             return None
-        _, user_id, _, _, status = req
+        _, user_id, _, _, deposit_type, status = req
         if status == "credited":
             return -1
 
-        await self.credit_balance(user_id, amount)
+        await self.credit_wallet(user_id, deposit_type, amount)
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
                 """
@@ -393,7 +423,8 @@ class Database:
 db = Database(DB_PATH)
 dp = Dispatcher()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-awaiting_deposit_submission: set[int] = set()
+awaiting_deposit_submission: dict[int, str] = {}
+admin_account_login_state: dict[int, dict] = {}
 
 
 def force_join_keyboard() -> InlineKeyboardMarkup:
@@ -479,9 +510,14 @@ async def show_account_countries(message: Message, account_type: str, label: str
     await message.answer("Choose country:", reply_markup=country_keyboard(account_type, countries))
 
 
-@dp.message(F.text == BTN_TELEGRAM)
-async def telegram_accounts(message: Message):
-    await show_account_countries(message, "telegram", "Telegram accounts")
+@dp.message(F.text == BTN_TG1)
+async def tg1_accounts(message: Message):
+    await show_account_countries(message, "tg1", "TG ACCOUNT 1")
+
+
+@dp.message(F.text == BTN_TG2)
+async def tg2_accounts(message: Message):
+    await show_account_countries(message, "tg2", "TG ACCOUNT 2")
 
 
 @dp.message(F.text == BTN_WHATSAPP)
@@ -499,27 +535,37 @@ async def how_to_use_handler(message: Message):
     await message.answer(f"📖 How to Use: {HOW_TO_USE_LINK}")
 
 
-@dp.message(F.text == BTN_DEPOSIT)
-async def deposit_handler(message: Message):
-    text = "Please send the screenshot of your payment with your UTR ID and name."
-    awaiting_deposit_submission.add(message.from_user.id)
+async def ask_deposit_proof(message: Message, deposit_type: str):
+    text = f"Please send screenshot + name + UTR for {deposit_type.upper()}."
+    awaiting_deposit_submission[message.from_user.id] = deposit_type
     if os.path.exists(DEPOSIT_QR_PATH):
         await message.answer_photo(FSInputFile(DEPOSIT_QR_PATH), caption=text)
     else:
         await message.answer("QR image is not configured yet.\n" + text)
 
 
+@dp.message(F.text == BTN_DEPOSIT1)
+async def deposit1_handler(message: Message):
+    await ask_deposit_proof(message, "deposit_1")
+
+
+@dp.message(F.text == BTN_DEPOSIT2)
+async def deposit2_handler(message: Message):
+    await ask_deposit_proof(message, "deposit_2")
+
+
 @dp.message(lambda m: m.from_user and m.from_user.id in awaiting_deposit_submission)
 async def capture_deposit_submission(message: Message):
     if message.text == BTN_BACK:
-        awaiting_deposit_submission.discard(message.from_user.id)
+        awaiting_deposit_submission.pop(message.from_user.id, None)
         await message.answer("Back to main menu.", reply_markup=main_menu())
         return
 
     details = message.caption or message.text or "No details provided"
     screenshot_file_id = message.photo[-1].file_id if message.photo else None
-    request_id = await db.create_deposit_request(message.from_user.id, details, screenshot_file_id)
-    awaiting_deposit_submission.discard(message.from_user.id)
+    deposit_type = awaiting_deposit_submission.get(message.from_user.id, "deposit_1")
+    request_id = await db.create_deposit_request(message.from_user.id, details, screenshot_file_id, deposit_type)
+    awaiting_deposit_submission.pop(message.from_user.id, None)
 
     owner_text = (
         "💸 <b>New Deposit Request</b>\n"
@@ -527,7 +573,7 @@ async def capture_deposit_submission(message: Message):
         f"User ID: <code>{message.from_user.id}</code>\n"
         f"Name: {message.from_user.full_name}\n"
         f"Username: @{message.from_user.username or 'none'}\n\n"
-        f"Details:\n{details}"
+        f"Deposit Type: {deposit_type}\n\nDetails:\n{details}"
     )
     owner_actions = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -584,11 +630,12 @@ async def deny_deposit_request(callback: CallbackQuery):
 
 @dp.message(F.text == BTN_PROFILE)
 async def profile_handler(message: Message):
-    bal = await db.get_balance(message.from_user.id)
+    dep1, dep2 = await db.get_wallets(message.from_user.id)
     history = await db.purchase_history(message.from_user.id)
     lines = [
         f"👤 <b>Profile</b>",
-        f"💰 Balance: ₹{bal:.2f}",
+        f"💰 DEPOSIT 1: ₹{dep1:.2f}",
+        f"💰 DEPOSIT 2: ₹{dep2:.2f}",
         "🧾 Last Purchases:",
     ]
     if not history:
@@ -630,14 +677,15 @@ async def buy_now(callback):
         await callback.answer()
         return
 
-    purchase_id = await db.purchase(callback.from_user.id, account)
+    purchase_id, wallet_used = await db.purchase(callback.from_user.id, account)
     if purchase_id is None:
-        bal = await db.get_balance(callback.from_user.id)
+        dep1, dep2 = await db.get_wallets(callback.from_user.id)
         await callback.message.answer(
-            "❌ Insufficient deposit balance.\n"
+            "❌ Insufficient eligible balance.\n"
             f"Price: ₹{account.price:.2f}\n"
-            f"Your Balance: ₹{bal:.2f}\n\n"
-            "PLSS FIRST DEPOSIT USING DEPLOST BUTTON THEN PURCHASE THE NUMBER."
+            f"DEPOSIT 1: ₹{dep1:.2f}\n"
+            f"DEPOSIT 2: ₹{dep2:.2f}\n\n"
+            "Rules: TG ACCOUNT 2 uses DEPOSUIT 1, TG ACCOUNT 1 uses DEPOSIT 2, WhatsApp uses any."
         )
         await callback.answer()
         return
@@ -646,7 +694,8 @@ async def buy_now(callback):
         f"✅ Purchase successful!\n"
         f"Type: {account.account_type.upper()}\n"
         f"Number: <code>{account.number}</code>\n"
-        f"Password: <code>{DEFAULT_PASSWORD}</code>\n\n"
+        f"Password: <code>{DEFAULT_PASSWORD}</code>\n"
+        f"Wallet Used: <code>{wallet_used}</code>\n\n"
         "Waiting for OTP... it will be delivered instantly when received."
     )
     await callback.answer("Purchased")
@@ -664,24 +713,62 @@ async def report_problem(message: Message):
     await message.answer("Problem submitted. Owner will review it.")
 
 
-@dp.message(Command("addnum"))
-async def addnum_cmd(message: Message):
+@dp.message(Command("addnumber"))
+async def addnumber_cmd(message: Message):
     if not is_owner(message.from_user.id):
         return
     parts = message.text.split()
-    if len(parts) < 4:
-        await message.answer("Usage: /addnum <number> <country> <price>")
+    if len(parts) != 5:
+        await message.answer("Usage: /addnumber <number> <country> <price> <tg_add_id>")
         return
-    _, number, country, price = parts[:4]
+    _, number, country, price, tg_add_id = parts
     try:
         price_value = float(price)
+        tg_id = int(tg_add_id)
     except ValueError:
-        await message.answer("Invalid price.")
+        await message.answer("Invalid price or TG ADD ID.")
         return
 
-    await db.add_account(number, country, price_value, "telegram", message.from_user.id)
-    await message.answer(f"Added TELEGRAM number {number} for {country} at ₹{price_value:.2f}.")
+    if tg_id == 412:
+        account_type = "tg1"
+    elif tg_id == 413:
+        account_type = "tg2"
+    else:
+        await message.answer("TG ADD ID must be 412 (TG ACCOUNT 1) or 413 (TG ACCOUNT 2).")
+        return
 
+    await db.add_account(number, country, price_value, account_type, message.from_user.id)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("UPDATE accounts SET tg_add_id = ? WHERE number = ? AND status = 'available'", (tg_id, number))
+        await conn.commit()
+
+    admin_account_login_state[message.from_user.id] = {"number": number, "tg_add_id": tg_id}
+    await message.answer(
+        f"Added {account_type.upper()} number {number}.\n"
+        "Now send OTP from that account in format: /loginotp 1 2 3 4 5\n"
+        "2-Step password is fixed as 1010."
+    )
+
+
+
+
+@dp.message(Command("loginotp"))
+async def loginotp_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    state = admin_account_login_state.get(message.from_user.id)
+    if not state:
+        await message.answer("No pending account login. First use /addnumber.")
+        return
+    otp = "".join(message.text.split()[1:])
+    if len(otp) < 5:
+        await message.answer("Usage: /loginotp 1 2 3 4 5")
+        return
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("UPDATE accounts SET login_status = 'logged_in' WHERE number = ?", (state['number'],))
+        await conn.commit()
+    admin_account_login_state.pop(message.from_user.id, None)
+    await message.answer(f"Account {state['number']} login marked complete. OTP setup saved. Use /setotp when OTP arrives. PASS: {DEFAULT_PASSWORD}")
 
 @dp.message(Command("addaccount"))
 async def addaccount_cmd(message: Message):
@@ -689,13 +776,13 @@ async def addaccount_cmd(message: Message):
         return
     parts = message.text.split()
     if len(parts) < 5:
-        await message.answer("Usage: /addaccount <telegram|whatsapp> <number> <country> <price>")
+        await message.answer("Usage: /addaccount <tg1|tg2|whatsapp> <number> <country> <price>")
         return
 
     _, account_type, number, country, price = parts[:5]
     account_type = account_type.lower()
-    if account_type not in {"telegram", "whatsapp"}:
-        await message.answer("Type must be telegram or whatsapp.")
+    if account_type not in {"tg1", "tg2", "whatsapp"}:
+        await message.answer("Type must be tg1, tg2 or whatsapp.")
         return
 
     try:
@@ -717,8 +804,8 @@ async def setbalance_cmd(message: Message):
         await message.answer("Usage: /setbalance <user_id> <amount>")
         return
     _, user_id, amount = parts
-    await db.set_balance(int(user_id), float(amount))
-    await message.answer("Balance updated.")
+    await db.credit_wallet(int(user_id), "deposit_1", float(amount))
+    await message.answer("DEPOSIT 1 updated (credit mode).")
 
 
 @dp.message(Command("credit"))
@@ -730,8 +817,8 @@ async def credit_cmd(message: Message):
         await message.answer("Usage: /credit <user_id> <amount>")
         return
     _, user_id, amount = parts
-    await db.credit_balance(int(user_id), float(amount))
-    await message.answer("Balance credited.")
+    await db.credit_wallet(int(user_id), "deposit_2", float(amount))
+    await message.answer("DEPOSIT 2 credited.")
 
 
 @dp.message(Command("add"))
@@ -820,10 +907,9 @@ async def broadcast_cmd(message: Message):
 
 async def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing. Please configure .env")
+        raise RuntimeError("BOT_TOKEN is missing. Set it at the top env var or system env.")
     await db.init()
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
