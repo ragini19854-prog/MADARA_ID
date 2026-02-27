@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8689321437:AAGxyDXpJDcS8c1KnsUSwdQ30-v8EaVPzoY")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8633946071:AAFEV411HFXAjsijKkzZfE1Zj_jAvMPtrLY")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 DEPOSIT_QR_PATH = os.getenv("DEPOSIT_QR_PATH", "https://files.catbox.moe/yud6sd.png")
 WELCOME_VIDEO_URL = os.getenv("WELCOME_VIDEO_URL", "https://files.catbox.moe/y1btis.mp4").strip()
