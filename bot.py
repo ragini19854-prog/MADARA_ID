@@ -21,11 +21,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8689321437:AAGxyDXpJDcS8c1KnsUSwdQ30-v8EaVPzoY")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
-DEPOSIT_QR_PATH = os.getenv("DEPOSIT_QR_PATH", "assets/deposit_qr.png")
-WELCOME_VIDEO_URL = os.getenv("WELCOME_VIDEO_URL", "").strip()
-BRAND_NAME = os.getenv("BRAND_NAME", "Madara Virtual Account Bot").strip()
+DEPOSIT_QR_PATH = os.getenv("DEPOSIT_QR_PATH", "https://files.catbox.moe/yud6sd.png")
+WELCOME_VIDEO_URL = os.getenv("WELCOME_VIDEO_URL", "https://files.catbox.moe/y1btis.mp4").strip()
+BRAND_NAME = os.getenv("BRAND_NAME", "GMS OP BOT").strip()
 
 SUPPORT_LINK = "https://t.me/Madara_babu_gms_bot"
 HOW_TO_USE_LINK = "https://t.me/MADARABITSUPPROT412"
